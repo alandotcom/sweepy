@@ -227,74 +227,32 @@ def is_sweep_today(sweep_day_name: str, schedule: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _parse_time_minutes(time_str: str) -> int | None:
-    """Parse a time like '7:30 am' or '2 pm' into minutes since midnight."""
-    t = time_str.strip().lower()
-    try:
-        for fmt in ("%I:%M %p", "%I %p"):
-            try:
-                dt = datetime.strptime(t, fmt)
-                return dt.hour * 60 + dt.minute
-            except ValueError:
-                continue
-    except Exception:
-        pass
-    return None
-
-
 def format_street_summary(routes: list[dict]) -> str:
     """Format all routes for a street into one consolidated card."""
     first = routes[0]
     street = first.get("STNAME") or ""
-    direction = first.get("TDIR") or ""
     suffix = first.get("STSFX") or ""
     schedule = first.get("Weeks") or ""
 
-    street_label = " ".join(filter(None, [direction, street, suffix])).upper()
+    street_label = " ".join(filter(None, [street, suffix])).upper()
 
     # Collect unique days across all routes
     days = list(
         dict.fromkeys(r.get("Posted_Day") for r in routes if r.get("Posted_Day"))
     )
 
-    # Compute time range across all routes
-    all_starts: list[int] = []
-    all_ends: list[int] = []
-    for r in routes:
-        posted_time = r.get("Posted_Time") or ""
-        # Typical format: "7:30 am to 2 pm" or "8 am - 10 am"
-        for sep in (" to ", " - "):
-            if sep in posted_time.lower():
-                parts = posted_time.split(sep, 1)
-                s = _parse_time_minutes(parts[0])
-                e = _parse_time_minutes(parts[1])
-                if s is not None:
-                    all_starts.append(s)
-                if e is not None:
-                    all_ends.append(e)
-                break
-
-    time_range = ""
-    if all_starts and all_ends:
-        earliest = min(all_starts)
-        latest = max(all_ends)
-
-        def _fmt_minutes(m: int) -> str:
-            if m % 60:
-                return (
-                    datetime(2000, 1, 1, m // 60, m % 60).strftime("%-I:%M %p").lower()
-                )
-            return datetime(2000, 1, 1, m // 60).strftime("%-I %p").lower()
-
-        time_range = f"{_fmt_minutes(earliest)} - {_fmt_minutes(latest)}"
+    # Collect unique posted times across all routes
+    times = list(
+        dict.fromkeys(r.get("Posted_Time") for r in routes if r.get("Posted_Time"))
+    )
 
     lines = [f"🧹 *{street_label}*"]
     if days:
         lines.append(f"📅 {' & '.join(days)}")
     if schedule:
         lines.append(f"🔄 {schedule}")
-    if time_range:
-        lines.append(f"🕐 {time_range}")
+    if times:
+        lines.append(f"🕐 {', '.join(times)}")
 
     # Sweep status — check each day
     if days and schedule:
