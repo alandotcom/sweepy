@@ -5,7 +5,7 @@ Tells you when street sweeping happens at your LA address.
 
 Architecture:
   1. User sends /sweep <address> or just texts an address
-  2. Bot geocodes via ArcGIS World Geocoder (free, no key needed for <50 req/day)
+  2. Bot geocodes via ArcGIS World Geocoder (free tier: 20k/month with API key)
   3. Spatial query against LA's Clean_Street_Routes FeatureServer
   4. Returns sweep day, time window, week schedule, and next sweep date
 
@@ -40,9 +40,10 @@ load_dotenv()
 # Config
 # ---------------------------------------------------------------------------
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+ARCGIS_API_KEY = os.environ.get("ARCGIS_API_KEY", "")
 LA_TZ = ZoneInfo("America/Los_Angeles")
 
-# LA's public ArcGIS feature services (no auth needed)
+# ArcGIS geocoder (authenticated with API key for 20k free geocodes/month)
 GEOCODE_URL = "https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates"
 # Layer 0 = Centerlines_Centroid_Routes_v2 (centerlines with sweep schedule joined)
 ROUTES_URL = "https://services5.arcgis.com/7nsPwEMP38bSkCjy/arcgis/rest/services/Clean_Street_Routes/FeatureServer/0/query"
@@ -97,6 +98,8 @@ async def geocode_address(address: str) -> dict | None:
         "location": "-118.25,34.05",
         "distance": 50000,
     }
+    if ARCGIS_API_KEY:
+        params["token"] = ARCGIS_API_KEY
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(GEOCODE_URL, params=params)
         data = resp.json()
