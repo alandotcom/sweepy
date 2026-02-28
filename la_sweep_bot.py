@@ -93,7 +93,7 @@ async def geocode_address(address: str) -> dict | None:
         "f": "json",
         "singleLine": address,
         "outFields": "Match_addr,Addr_type",
-        "maxLocations": 1,
+        "maxLocations": 5,
         # Bias toward LA
         "location": "-118.25,34.05",
         "distance": 50000,
@@ -109,7 +109,7 @@ async def geocode_address(address: str) -> dict | None:
         _geocode_cache[cache_key] = None
         return None
 
-    best = candidates[0]
+    best = max(candidates, key=lambda c: c.get("score", 0))
     loc = best["location"]
     result = {
         "x": loc["x"],
@@ -360,9 +360,12 @@ async def _lookup_coords(update: Update, x: float, y: float, label: str) -> None
     if not update.message:
         return
 
-    routes = await query_sweep_routes(x, y, radius_ft=200)
-    if not routes:
-        routes = await query_sweep_routes(x, y, radius_ft=500)
+    raw_routes = await query_sweep_routes(x, y, radius_ft=200)
+    if not raw_routes:
+        raw_routes = await query_sweep_routes(x, y, radius_ft=500)
+
+    # Drop segments with no posted sweep schedule
+    routes = [r for r in raw_routes if r.get("Posted_Day")]
 
     if not routes:
         await update.message.reply_text(
@@ -380,7 +383,7 @@ async def _lookup_coords(update: Update, x: float, y: float, label: str) -> None
     seen = set()
     unique_routes = []
     for r in routes:
-        key = (r.get("Route", ""), r.get("Posted_Day", ""))
+        key = (r.get("Route", ""), r.get("Posted_Day", ""), r.get("STNAME", ""), r.get("TDIR", ""))
         if key not in seen:
             seen.add(key)
             unique_routes.append(r)
