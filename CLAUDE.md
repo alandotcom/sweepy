@@ -30,4 +30,4 @@ Single-file Telegram bot (`la_sweep_bot.py`) that looks up LA street sweeping sc
 - Actual FeatureServer field names: `Route`, `Posted_Day`, `Posted_Time`, `Weeks`, `Boundaries`, `Day_Short`, `STNAME`, `TDIR`, `STSFX`. These differ from what ArcGIS docs might suggest.
 - Holiday list is hardcoded per-year (currently 2026 only). User has confirmed dates are correct.
 - All APIs are free: ArcGIS World Geocoder (no key, non-stored results) and LA City FeatureServer (open data).
-- Redis caching is planned but not yet implemented.
+- In-memory TTL caching (`cachetools`) is used for geocode results (7-day TTL) and route queries (24-hour TTL) to reduce API quota usage.

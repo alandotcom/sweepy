@@ -22,6 +22,7 @@ import logging
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
+from cachetools import TTLCache
 import httpx
 from dotenv import load_dotenv
 from telegram import Update
@@ -48,17 +49,17 @@ ROUTES_URL = "https://services5.arcgis.com/7nsPwEMP38bSkCjy/arcgis/rest/services
 
 # 2026 LA city holidays (no sweep enforcement)
 HOLIDAYS_2026 = {
-    date(2026, 1, 1),   # New Year's Day
+    date(2026, 1, 1),  # New Year's Day
     date(2026, 1, 19),  # MLK Day
     date(2026, 2, 16),  # Presidents' Day
     date(2026, 3, 31),  # Cesar Chavez Day
     date(2026, 5, 25),  # Memorial Day
-    date(2026, 7, 3),   # Independence Day (observed)
-    date(2026, 9, 7),   # Labor Day
-    date(2026, 11, 11), # Veterans Day
-    date(2026, 11, 26), # Thanksgiving
-    date(2026, 11, 27), # Day after Thanksgiving
-    date(2026, 12, 25), # Christmas
+    date(2026, 7, 3),  # Independence Day (observed)
+    date(2026, 9, 7),  # Labor Day
+    date(2026, 11, 11),  # Veterans Day
+    date(2026, 11, 26),  # Thanksgiving
+    date(2026, 11, 27),  # Day after Thanksgiving
+    date(2026, 12, 25),  # Christmas
 }
 
 logging.basicConfig(
@@ -67,12 +68,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# In-memory TTL caches — keeps API quota usage low for repeated lookups
+_geocode_cache: TTLCache[str, dict | None] = TTLCache(
+    maxsize=1024, ttl=604_800
+)  # 7 days
+_routes_cache: TTLCache[tuple, list[dict]] = TTLCache(
+    maxsize=2048, ttl=86_400
+)  # 24 hours
+
 # ---------------------------------------------------------------------------
 # ArcGIS helpers
 # ---------------------------------------------------------------------------
 
+
 async def geocode_address(address: str) -> dict | None:
     """Geocode an address using ArcGIS World Geocoder. Returns {x, y, match_addr}."""
+    cache_key = " ".join(address.lower().split())
+    if cache_key in _geocode_cache:
+        logger.info(f"Geocode cache hit: '{cache_key}'")
+        return _geocode_cache[cache_key]
+
     params = {
         "f": "json",
         "singleLine": address,
@@ -88,16 +103,19 @@ async def geocode_address(address: str) -> dict | None:
 
     candidates = data.get("candidates", [])
     if not candidates:
+        _geocode_cache[cache_key] = None
         return None
 
     best = candidates[0]
     loc = best["location"]
-    return {
+    result = {
         "x": loc["x"],
         "y": loc["y"],
         "match_addr": best["attributes"].get("Match_addr", address),
         "score": best.get("score", 0),
     }
+    _geocode_cache[cache_key] = result
+    return result
 
 
 async def query_sweep_routes(x: float, y: float, radius_ft: int = 200) -> list[dict]:
@@ -109,6 +127,11 @@ async def query_sweep_routes(x: float, y: float, radius_ft: int = 200) -> list[d
     the `units` param needed for point-buffer queries.
     ~0.000003 degrees/ft at LA's latitude.
     """
+    cache_key = (round(x, 4), round(y, 4), radius_ft)
+    if cache_key in _routes_cache:
+        logger.info(f"Routes cache hit: {cache_key}")
+        return _routes_cache[cache_key]
+
     deg_offset = radius_ft * 0.000003
     envelope = f"{x - deg_offset},{y - deg_offset},{x + deg_offset},{y + deg_offset}"
 
@@ -131,7 +154,9 @@ async def query_sweep_routes(x: float, y: float, radius_ft: int = 200) -> list[d
         return []
 
     features = data.get("features", [])
-    return [f["attributes"] for f in features]
+    result = [f["attributes"] for f in features]
+    _routes_cache[cache_key] = result
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +221,7 @@ def is_sweep_today(sweep_day_name: str, schedule: str) -> bool:
 # ---------------------------------------------------------------------------
 # Format response
 # ---------------------------------------------------------------------------
+
 
 def format_route_info(attrs: dict) -> str:
     """Format a single route's attributes into a readable message."""
@@ -374,6 +400,7 @@ async def _lookup_coords(update: Update, x: float, y: float, label: str) -> None
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
