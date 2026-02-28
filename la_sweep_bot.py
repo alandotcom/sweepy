@@ -17,22 +17,34 @@ Setup:
   3. python la_sweep_bot.py
 """
 
+import json
 import os
 import logging
+import re
 from collections import Counter
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, time as dt_time
 from zoneinfo import ZoneInfo
 
 from cachetools import TTLCache
 import httpx
 from dotenv import load_dotenv
 from telegram import Update
+from telegram.error import Forbidden
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
     ContextTypes,
     filters,
+)
+
+from db import (
+    init_db,
+    add_subscription,
+    remove_subscription,
+    remove_all_subscriptions,
+    get_user_subscriptions,
+    get_all_subscriptions,
 )
 
 load_dotenv()
@@ -81,6 +93,13 @@ _routes_cache: TTLCache[tuple, list[dict]] = TTLCache(
 # ---------------------------------------------------------------------------
 # ArcGIS helpers
 # ---------------------------------------------------------------------------
+
+
+def normalize_address(address: str) -> str:
+    """Append ', Los Angeles, CA' if the address doesn't mention LA."""
+    if not re.search(r"\blos angeles\b|\bla\b", address, re.IGNORECASE):
+        return address + ", Los Angeles, CA"
+    return address
 
 
 async def geocode_address(address: str) -> dict | None:
@@ -169,36 +188,109 @@ async def query_sweep_routes(x: float, y: float, radius_ft: int = 200) -> list[d
 
 DAY_NUM = {"Monday": 0, "Tuesday": 1, "Wednesday": 2, "Thursday": 3, "Friday": 4}
 
+# Official 2026 sweep week calendar — from LA StreetsLA PDF
+# https://streets.lacity.gov/sites/default/files/2025-12/Sweeping2026.pdf
+# Each month has exactly 4 posted sweep weeks starting on the first full
+# Monday-Friday row. Partial weeks at month edges are non-posted.
+# Week 1 & 3 match "1st & 3rd" schedule, week 2 & 4 match "2nd & 4th".
+_SWEEP_MONDAYS_2026 = [
+    # January
+    (date(2026, 1, 5), 1),
+    (date(2026, 1, 12), 2),
+    (date(2026, 1, 19), 3),
+    (date(2026, 1, 26), 4),
+    # February
+    (date(2026, 2, 2), 1),
+    (date(2026, 2, 9), 2),
+    (date(2026, 2, 16), 3),
+    (date(2026, 2, 23), 4),
+    # March
+    (date(2026, 3, 2), 1),
+    (date(2026, 3, 9), 2),
+    (date(2026, 3, 16), 3),
+    (date(2026, 3, 23), 4),
+    # April
+    (date(2026, 4, 6), 1),
+    (date(2026, 4, 13), 2),
+    (date(2026, 4, 20), 3),
+    (date(2026, 4, 27), 4),
+    # May
+    (date(2026, 5, 4), 1),
+    (date(2026, 5, 11), 2),
+    (date(2026, 5, 18), 3),
+    (date(2026, 5, 25), 4),
+    # June
+    (date(2026, 6, 1), 1),
+    (date(2026, 6, 8), 2),
+    (date(2026, 6, 15), 3),
+    (date(2026, 6, 22), 4),
+    # July
+    (date(2026, 7, 6), 1),
+    (date(2026, 7, 13), 2),
+    (date(2026, 7, 20), 3),
+    (date(2026, 7, 27), 4),
+    # August
+    (date(2026, 8, 3), 1),
+    (date(2026, 8, 10), 2),
+    (date(2026, 8, 17), 3),
+    (date(2026, 8, 24), 4),
+    # September
+    (date(2026, 9, 7), 1),
+    (date(2026, 9, 14), 2),
+    (date(2026, 9, 21), 3),
+    (date(2026, 9, 28), 4),
+    # October
+    (date(2026, 10, 5), 1),
+    (date(2026, 10, 12), 2),
+    (date(2026, 10, 19), 3),
+    (date(2026, 10, 26), 4),
+    # November
+    (date(2026, 11, 2), 1),
+    (date(2026, 11, 9), 2),
+    (date(2026, 11, 16), 3),
+    (date(2026, 11, 23), 4),
+    # December
+    (date(2026, 12, 7), 1),
+    (date(2026, 12, 14), 2),
+    (date(2026, 12, 21), 3),
+    (date(2026, 12, 28), 4),
+]
 
-def get_week_occurrence(d: date) -> int:
-    """Return which occurrence of this weekday in the month (1-5)."""
-    return (d.day - 1) // 7 + 1
+# Build lookup: date → sweep week number (1-4)
+# Dates absent from this dict are non-posted (no sweeping on posted routes)
+SWEEP_WEEK_2026: dict[date, int] = {}
+for _monday, _week in _SWEEP_MONDAYS_2026:
+    for _offset in range(5):  # Mon through Fri
+        SWEEP_WEEK_2026[_monday + timedelta(days=_offset)] = _week
+
+
+def _valid_weeks(schedule: str) -> set[int]:
+    """Parse a schedule string like '1 & 3' or '2 & 4' into valid week numbers."""
+    if "1" in schedule and "3" in schedule:
+        return {1, 3}
+    if "2" in schedule and "4" in schedule:
+        return {2, 4}
+    return {1, 2, 3, 4}
 
 
 def next_sweep_dates(sweep_day_name: str, schedule: str, count: int = 3) -> list[date]:
     """
     Given a weekday name and schedule like '1st & 3rd' or '2nd & 4th',
-    return the next `count` sweep dates (skipping holidays).
+    return the next `count` sweep dates using the official 2026 calendar.
     """
     target_dow = DAY_NUM.get(sweep_day_name)
     if target_dow is None:
         return []
 
-    if "1" in schedule and "3" in schedule:
-        valid_weeks = {1, 3}
-    elif "2" in schedule and "4" in schedule:
-        valid_weeks = {2, 4}
-    else:
-        valid_weeks = {1, 2, 3, 4}  # fallback
+    valid = _valid_weeks(schedule)
 
     today = datetime.now(LA_TZ).date()
     results = []
     d = today
-    # Scan up to 120 days out
     for _ in range(120):
         if d.weekday() == target_dow:
-            occ = get_week_occurrence(d)
-            if occ in valid_weeks and d not in HOLIDAYS_2026:
+            week = SWEEP_WEEK_2026.get(d)
+            if week in valid and d not in HOLIDAYS_2026:
                 if d >= today:
                     results.append(d)
                     if len(results) >= count:
@@ -214,12 +306,10 @@ def is_sweep_today(sweep_day_name: str, schedule: str) -> bool:
         return False
     if today.strftime("%A") != sweep_day_name:
         return False
-    occ = get_week_occurrence(today)
-    if "1" in schedule and "3" in schedule:
-        return occ in (1, 3)
-    elif "2" in schedule and "4" in schedule:
-        return occ in (2, 4)
-    return False
+    week = SWEEP_WEEK_2026.get(today)
+    if week is None:
+        return False
+    return week in _valid_weeks(schedule)
 
 
 # ---------------------------------------------------------------------------
@@ -227,24 +317,12 @@ def is_sweep_today(sweep_day_name: str, schedule: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def format_street_summary(routes: list[dict]) -> str:
-    """Format all routes for a street into one consolidated card."""
-    first = routes[0]
-    street = first.get("STNAME") or ""
-    suffix = first.get("STSFX") or ""
-    schedule = first.get("Weeks") or ""
-
-    street_label = " ".join(filter(None, [street, suffix])).upper()
-
-    # Collect unique days across all routes
-    days: list[str] = list(
-        dict.fromkeys(d for r in routes if isinstance(d := r.get("Posted_Day"), str))
-    )
-
-    # Collect unique posted times across all routes
-    times: list[str] = list(
-        dict.fromkeys(t for r in routes if isinstance(t := r.get("Posted_Time"), str))
-    )
+def format_street_summary(details: dict) -> str:
+    """Format structured sweep details into a display card."""
+    street_label = details["street_name"]
+    days = details["sweep_days"]
+    schedule = details["sweep_schedule"]
+    times = details["sweep_time"]
 
     lines = [f"🧹 *{street_label}*"]
     if days:
@@ -252,7 +330,7 @@ def format_street_summary(routes: list[dict]) -> str:
     if schedule:
         lines.append(f"🔄 {schedule}")
     if times:
-        lines.append(f"🕐 {', '.join(times)}")
+        lines.append(f"🕐 {times}")
 
     # Sweep status — check each day
     if days and schedule:
@@ -270,8 +348,8 @@ def format_street_summary(routes: list[dict]) -> str:
     return "\n".join(lines)
 
 
-async def lookup_sweep_info(x: float, y: float) -> dict:
-    """Coords → filtered routes → formatted summary. Telegram-agnostic."""
+async def get_sweep_details(x: float, y: float) -> dict:
+    """Coords → filtered routes → structured details dict."""
     raw_routes = await query_sweep_routes(x, y, radius_ft=200)
     if not raw_routes:
         raw_routes = await query_sweep_routes(x, y, radius_ft=500)
@@ -284,6 +362,34 @@ async def lookup_sweep_info(x: float, y: float) -> dict:
         routes = [r for r in routes if r.get("STNAME") == primary_street]
 
     if not routes:
+        return {"found": False}
+
+    first = routes[0]
+    days: list[str] = list(
+        dict.fromkeys(d for r in routes if isinstance(d := r.get("Posted_Day"), str))
+    )
+    times: list[str] = list(
+        dict.fromkeys(t for r in routes if isinstance(t := r.get("Posted_Time"), str))
+    )
+    street = " ".join(
+        filter(None, [first.get("STNAME", ""), first.get("STSFX", "")])
+    ).upper()
+    schedule = first.get("Weeks", "")
+
+    return {
+        "found": True,
+        "routes": routes,
+        "sweep_days": days,
+        "sweep_schedule": schedule,
+        "sweep_time": ", ".join(times) if times else None,
+        "street_name": street,
+    }
+
+
+async def lookup_sweep_info(x: float, y: float) -> dict:
+    """Coords → filtered routes → formatted summary. Telegram-agnostic."""
+    details = await get_sweep_details(x, y)
+    if not details["found"]:
         return {
             "found": False,
             "text": (
@@ -292,7 +398,7 @@ async def lookup_sweep_info(x: float, y: float) -> dict:
                 "outside the City of LA."
             ),
         }
-    return {"found": True, "text": format_street_summary(routes)}
+    return {"found": True, "text": format_street_summary(details)}
 
 
 # ---------------------------------------------------------------------------
@@ -302,11 +408,14 @@ async def lookup_sweep_info(x: float, y: float) -> dict:
 HELP_TEXT = (
     "🧹 *LA Street Sweeping Bot*\n\n"
     "Send me an address and I'll tell you the street sweeping schedule.\n\n"
-    "Examples:\n"
+    "*Look up:*\n"
     "• `/sweep 1234 Main St, Los Angeles`\n"
-    "• `/sweep 456 N Fairfax Ave 90036`\n"
     "• Just type an address\n"
     "• Or share your 📍 location!\n\n"
+    "*Notifications:*\n"
+    "• `/subscribe 1234 Main St` — get alerts before sweeping\n"
+    "• `/mysubs` — see your subscriptions\n"
+    "• `/unsubscribe` — remove alerts\n\n"
     "Data from City of LA StreetsLA via ArcGIS."
 )
 
@@ -367,8 +476,7 @@ async def _lookup_address(update: Update, address: str) -> None:
     """Geocode a text address, then look up routes."""
     if not update.message:
         return
-    if "los angeles" not in address.lower() and "la" not in address.lower():
-        address += ", Los Angeles, CA"
+    address = normalize_address(address)
 
     await update.message.reply_text("🔍 Looking up your address...")
 
@@ -416,6 +524,220 @@ async def _lookup_coords(update: Update, x: float, y: float, label: str) -> None
 
 
 # ---------------------------------------------------------------------------
+# Subscription handlers
+# ---------------------------------------------------------------------------
+
+
+async def handle_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /subscribe <address> command."""
+    if not update.message:
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "Please provide an address.\n"
+            "Example: `/subscribe 1234 Main St, Los Angeles`",
+            parse_mode="Markdown",
+        )
+        return
+
+    address = normalize_address(" ".join(context.args))
+
+    await update.message.reply_text("🔍 Looking up your address...")
+
+    geo = await geocode_address(address)
+    if not geo or geo["score"] < 70:
+        await update.message.reply_text(
+            "❌ Couldn't find that address. Try including the full street name and zip code."
+        )
+        return
+
+    details = await get_sweep_details(x=geo["x"], y=geo["y"])
+    if not details["found"]:
+        await update.message.reply_text(
+            "No posted sweep routes found at that address. Can't subscribe."
+        )
+        return
+
+    err = await add_subscription(
+        chat_id=update.message.chat_id,
+        x=geo["x"],
+        y=geo["y"],
+        label=geo["match_addr"],
+        sweep_days=details["sweep_days"],
+        sweep_schedule=details["sweep_schedule"],
+        sweep_time=details["sweep_time"],
+        street_name=details["street_name"],
+    )
+    if err:
+        await update.message.reply_text(err)
+        return
+
+    days_str = " & ".join(details["sweep_days"])
+    await update.message.reply_text(
+        f"✅ Subscribed to sweep alerts!\n\n"
+        f"📍 {geo['match_addr']}\n"
+        f"🧹 {details['street_name']}\n"
+        f"📅 {days_str} ({details['sweep_schedule']})\n"
+        f"🕐 {details['sweep_time'] or 'Check posted signs'}\n\n"
+        f"You'll get notifications 2 days and 1 day before each sweep.\n"
+        f"Use /mysubs to see your subscriptions.",
+    )
+
+
+async def handle_mysubs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /mysubs command — list active subscriptions."""
+    if not update.message:
+        return
+
+    subs = await get_user_subscriptions(update.message.chat_id)
+    if not subs:
+        await update.message.reply_text(
+            "You don't have any subscriptions yet.\n"
+            "Use `/subscribe <address>` to get sweep alerts.",
+            parse_mode="Markdown",
+        )
+        return
+
+    lines = ["📋 Your Subscriptions\n"]
+    for i, sub in enumerate(subs, 1):
+        sweep_days = json.loads(sub["sweep_days"])
+        days_str = " & ".join(sweep_days)
+
+        # Compute next sweep date
+        all_dates: list[date] = []
+        for day_name in sweep_days:
+            all_dates.extend(next_sweep_dates(day_name, sub["sweep_schedule"], count=1))
+        all_dates.sort()
+        next_date = all_dates[0].strftime("%a %b %-d") if all_dates else "—"
+
+        lines.append(
+            f"{i}. 📍 {sub['label']}\n"
+            f"   🧹 {sub['street_name'] or '—'} — {days_str} ({sub['sweep_schedule']})\n"
+            f"   📆 Next: {next_date}"
+        )
+
+    lines.append("\nTo unsubscribe: /unsubscribe <number> or /unsubscribe all")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def handle_unsubscribe(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle /unsubscribe [number|all] command."""
+    if not update.message:
+        return
+    chat_id = update.message.chat_id
+
+    arg = " ".join(context.args).strip().lower() if context.args else ""
+
+    if arg == "all":
+        count = await remove_all_subscriptions(chat_id)
+        if count:
+            await update.message.reply_text(f"✅ Removed all {count} subscription(s).")
+        else:
+            await update.message.reply_text("You don't have any subscriptions.")
+        return
+
+    if arg.isdigit():
+        pos = int(arg)
+        subs = await get_user_subscriptions(chat_id)
+        if not subs or pos < 1 or pos > len(subs):
+            await update.message.reply_text(
+                "Invalid number. Use `/mysubs` to see your subscriptions.",
+                parse_mode="Markdown",
+            )
+            return
+        sub = subs[pos - 1]
+        await remove_subscription(chat_id, sub["id"])
+        await update.message.reply_text(
+            f"✅ Unsubscribed from sweep alerts for {sub['label']}."
+        )
+        return
+
+    # No argument or invalid — show usage
+    await update.message.reply_text(
+        "Usage:\n"
+        "• `/unsubscribe 1` — remove subscription #1\n"
+        "• `/unsubscribe all` — remove all\n\n"
+        "Use `/mysubs` to see your subscriptions.",
+        parse_mode="Markdown",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Notification job
+# ---------------------------------------------------------------------------
+
+
+async def send_notifications(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Daily job: send 2-day and 1-day sweep warnings to subscribers."""
+    today = datetime.now(LA_TZ).date()
+    tomorrow = today + timedelta(days=1)
+    day_after = today + timedelta(days=2)
+
+    all_subs = await get_all_subscriptions()
+    logger.info(f"Notification check: {len(all_subs)} subscription(s)")
+
+    blocked_chats: set[int] = set()
+    for sub in all_subs:
+        if sub["chat_id"] in blocked_chats:
+            continue
+        sweep_days = json.loads(sub["sweep_days"])
+        schedule = sub["sweep_schedule"]
+
+        # Collect upcoming dates across all sweep days for this subscription
+        upcoming: list[date] = []
+        for day_name in sweep_days:
+            upcoming.extend(next_sweep_dates(day_name, schedule, count=2))
+
+        # Check for 1-day or 2-day warning (1-day takes priority)
+        msg = None
+        for sweep_date in sorted(upcoming):
+            if sweep_date == tomorrow:
+                msg = (
+                    f"⚠️ Sweep TOMORROW!\n"
+                    f"📍 {sub['label']}\n"
+                    f"🧹 {sub['street_name'] or 'Your street'}\n"
+                    f"📅 {sweep_date.strftime('%A %b %-d')}\n"
+                    f"🕐 {sub['sweep_time'] or 'Check posted signs'}\n\n"
+                    f"Move your car tonight!"
+                )
+                break
+            elif sweep_date == day_after:
+                msg = (
+                    f"📋 Sweep in 2 days\n"
+                    f"📍 {sub['label']}\n"
+                    f"🧹 {sub['street_name'] or 'Your street'}\n"
+                    f"📅 {sweep_date.strftime('%A %b %-d')}\n"
+                    f"🕐 {sub['sweep_time'] or 'Check posted signs'}"
+                )
+                # Don't break — a closer (tomorrow) date may appear next
+
+        if msg:
+            try:
+                await context.bot.send_message(chat_id=sub["chat_id"], text=msg)
+            except Forbidden:
+                logger.info(
+                    f"User {sub['chat_id']} blocked bot, removing subscriptions"
+                )
+                blocked_chats.add(sub["chat_id"])
+                await remove_all_subscriptions(sub["chat_id"])
+            except Exception:
+                logger.exception(f"Failed to send notification to {sub['chat_id']}")
+
+
+async def post_init(application: Application) -> None:
+    """Called after Application.initialize() — set up DB and daily job."""
+    await init_db()
+    application.job_queue.run_daily(  # type: ignore[union-attr]
+        send_notifications,
+        time=dt_time(hour=7, minute=0, tzinfo=LA_TZ),
+        name="daily_sweep_notifications",
+    )
+    logger.info("Scheduled daily sweep notifications at 7:00 AM LA time")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -428,11 +750,14 @@ def main() -> None:
         print("=" * 60)
         return
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", start))
     app.add_handler(CommandHandler("sweep", handle_sweep))
+    app.add_handler(CommandHandler("subscribe", handle_subscribe))
+    app.add_handler(CommandHandler("mysubs", handle_mysubs))
+    app.add_handler(CommandHandler("unsubscribe", handle_unsubscribe))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
 

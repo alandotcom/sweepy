@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from la_sweep_bot import geocode_address, lookup_sweep_info
+from la_sweep_bot import geocode_address, lookup_sweep_info, normalize_address
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -42,8 +42,7 @@ async def api_address(req: AddressRequest):
     if not address:
         return {"found": False, "text": "Please enter an address."}
 
-    if "los angeles" not in address.lower() and "la" not in address.lower():
-        address += ", Los Angeles, CA"
+    address = normalize_address(address)
 
     geo = await geocode_address(address)
     if not geo or geo["score"] < 70:

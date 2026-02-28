@@ -3,6 +3,13 @@ primary_region = 'lax'
 
 [build]
 
+[env]
+  SWEEP_DB_PATH = "/data/subscriptions.db"
+
+[mounts]
+  source = "sweep_data"
+  destination = "/data"
+
 [processes]
   bot = "uv run --no-sync python la_sweep_bot.py"
   web = "uv run --no-sync uvicorn web_app:app --host 0.0.0.0 --port 8080"
