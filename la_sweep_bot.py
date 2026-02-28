@@ -244,7 +244,24 @@ def format_route_group(group: list[dict]) -> str:
     suffix = first.get("STSFX") or ""
     side = first.get("Odd_Even") or ""
 
-    street_label = " ".join(filter(None, [direction, street, suffix]))
+    street_label = " ".join(filter(None, [street, suffix]))
+
+    # Derive cardinal side from street direction + even/odd
+    # LA convention: E/W streets → even=south, odd=north
+    #                N/S streets → even=west, odd=east
+    side_label = ""
+    if side and direction:
+        side_map = {
+            ("E", "Even"): "south",
+            ("E", "Odd"): "north",
+            ("W", "Even"): "south",
+            ("W", "Odd"): "north",
+            ("N", "Even"): "west",
+            ("N", "Odd"): "east",
+            ("S", "Even"): "west",
+            ("S", "Odd"): "east",
+        }
+        side_label = side_map.get((direction, side), "")
 
     # Collect unique days across the group
     days = list(
@@ -253,7 +270,7 @@ def format_route_group(group: list[dict]) -> str:
 
     lines = [f"🧹 *Route {route_base}*"]
     if street_label:
-        side_note = f" ({side.lower()} side)" if side else ""
+        side_note = f" ({side_label} side)" if side_label else ""
         lines.append(f"🛣 Street: {street_label}{side_note}")
     if days:
         lines.append(f"📅 Days: {', '.join(days)}")
