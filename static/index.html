@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LA Street Sweeping Lookup</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: #f5f5f5;
+  color: #333;
+  display: flex;
+  justify-content: center;
+  padding: 20px;
+}
+.container {
+  max-width: 480px;
+  width: 100%;
+}
+h1 {
+  font-size: 1.5rem;
+  text-align: center;
+  margin-bottom: 20px;
+}
+.card {
+  background: #fff;
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 16px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+input[type="text"] {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  font-size: 1rem;
+  margin-bottom: 12px;
+}
+input[type="text"]:focus {
+  outline: none;
+  border-color: #4a90d9;
+}
+button {
+  width: 100%;
+  padding: 14px;
+  border: none;
+  border-radius: 8px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+button:active { opacity: 0.8; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-location {
+  background: #4a90d9;
+  color: #fff;
+  margin-bottom: 12px;
+}
+.btn-address {
+  background: #333;
+  color: #fff;
+}
+.divider {
+  text-align: center;
+  color: #999;
+  margin: 4px 0 12px;
+  font-size: 0.85rem;
+}
+#result {
+  display: none;
+}
+#result .result-text {
+  line-height: 1.6;
+  white-space: pre-line;
+  font-size: 1.05rem;
+}
+#result .result-text strong { font-weight: 700; }
+.error { color: #c00; }
+.map-link {
+  display: block;
+  text-align: center;
+  margin-top: 16px;
+  color: #4a90d9;
+  text-decoration: none;
+  font-weight: 600;
+}
+.spinner {
+  text-align: center;
+  padding: 20px;
+  color: #888;
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>LA Street Sweeping</h1>
+
+  <div class="card">
+    <button class="btn-location" id="btnLocation">Use My Location</button>
+    <div class="divider">or</div>
+    <label for="address">Enter an address</label>
+    <input type="text" id="address" placeholder="1234 Main St, Los Angeles">
+    <button class="btn-address" id="btnAddress">Look Up</button>
+  </div>
+
+  <div id="result" class="card">
+    <div class="result-text" id="resultText"></div>
+    <a class="map-link" href="https://labss.maps.arcgis.com/apps/dashboards/ad01106434a443a69924c54f1e8edbf7" target="_blank">View on LA Map</a>
+  </div>
+</div>
+
+<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<script>
+function formatText(text) {
+  // Convert *bold* to <strong>
+  return text.replace(/\*([^*]+)\*/g, '<strong>$1</strong>');
+}
+
+function showResult(data) {
+  var html = formatText(data.text);
+  if (data.address) {
+    html = '<strong>' + data.address + '</strong>\n' + html;
+  }
+  $('#resultText').html(html);
+  if (data.found) {
+    $('#resultText').removeClass('error');
+  } else {
+    $('#resultText').addClass('error');
+  }
+  $('#result').show();
+}
+
+function showLoading() {
+  $('#resultText').html('<div class="spinner">Looking up sweep schedule...</div>');
+  $('#resultText').removeClass('error');
+  $('#result').show();
+}
+
+$('#btnLocation').on('click', function() {
+  if (!navigator.geolocation) {
+    alert('Geolocation is not supported by your browser.');
+    return;
+  }
+  var btn = $(this);
+  btn.prop('disabled', true).text('Getting location...');
+  navigator.geolocation.getCurrentPosition(
+    function(pos) {
+      btn.prop('disabled', false).text('Use My Location');
+      showLoading();
+      $.ajax({
+        url: '/api/lookup',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+        success: showResult,
+        error: function() {
+          showResult({ found: false, text: 'Something went wrong. Please try again.' });
+        }
+      });
+    },
+    function(err) {
+      btn.prop('disabled', false).text('Use My Location');
+      alert('Could not get your location: ' + err.message);
+    },
+    { enableHighAccuracy: true, timeout: 10000 }
+  );
+});
+
+function lookupAddress() {
+  var addr = $('#address').val().trim();
+  if (!addr) return;
+  showLoading();
+  $('#btnAddress').prop('disabled', true);
+  $.ajax({
+    url: '/api/address',
+    method: 'POST',
+    contentType: 'application/json',
+    data: JSON.stringify({ address: addr }),
+    success: function(data) {
+      $('#btnAddress').prop('disabled', false);
+      showResult(data);
+    },
+    error: function() {
+      $('#btnAddress').prop('disabled', false);
+      showResult({ found: false, text: 'Something went wrong. Please try again.' });
+    }
+  });
+}
+
+$('#btnAddress').on('click', lookupAddress);
+$('#address').on('keypress', function(e) {
+  if (e.which === 13) lookupAddress();
+});
+</script>
+</body>
+</html>

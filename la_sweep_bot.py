@@ -238,16 +238,12 @@ def format_street_summary(routes: list[dict]) -> str:
 
     # Collect unique days across all routes
     days: list[str] = list(
-        dict.fromkeys(
-            d for r in routes if isinstance(d := r.get("Posted_Day"), str)
-        )
+        dict.fromkeys(d for r in routes if isinstance(d := r.get("Posted_Day"), str))
     )
 
     # Collect unique posted times across all routes
     times: list[str] = list(
-        dict.fromkeys(
-            t for r in routes if isinstance(t := r.get("Posted_Time"), str)
-        )
+        dict.fromkeys(t for r in routes if isinstance(t := r.get("Posted_Time"), str))
     )
 
     lines = [f"🧹 *{street_label}*"]
@@ -272,6 +268,31 @@ def format_street_summary(routes: list[dict]) -> str:
             lines.append(f"\n📆 Next: {dates_str}")
 
     return "\n".join(lines)
+
+
+async def lookup_sweep_info(x: float, y: float) -> dict:
+    """Coords → filtered routes → formatted summary. Telegram-agnostic."""
+    raw_routes = await query_sweep_routes(x, y, radius_ft=200)
+    if not raw_routes:
+        raw_routes = await query_sweep_routes(x, y, radius_ft=500)
+
+    routes = [r for r in raw_routes if r.get("Posted_Day")]
+
+    if routes:
+        street_counts = Counter(r.get("STNAME", "") for r in routes)
+        primary_street = street_counts.most_common(1)[0][0]
+        routes = [r for r in routes if r.get("STNAME") == primary_street]
+
+    if not routes:
+        return {
+            "found": False,
+            "text": (
+                "No posted sweep routes found nearby. "
+                "This street may not have posted sweeping, or it might be "
+                "outside the City of LA."
+            ),
+        }
+    return {"found": True, "text": format_street_summary(routes)}
 
 
 # ---------------------------------------------------------------------------
@@ -363,45 +384,32 @@ async def _lookup_address(update: Update, address: str) -> None:
 
 
 async def _lookup_coords(update: Update, x: float, y: float, label: str) -> None:
-    """Core logic: spatial query by coordinates → respond."""
+    """Spatial query by coordinates → Telegram reply."""
     if not update.message:
         return
 
-    raw_routes = await query_sweep_routes(x, y, radius_ft=200)
-    if not raw_routes:
-        raw_routes = await query_sweep_routes(x, y, radius_ft=500)
+    result = await lookup_sweep_info(x, y)
 
-    # Drop segments with no posted sweep schedule
-    routes = [r for r in raw_routes if r.get("Posted_Day")]
+    map_link = (
+        "[Check the map](https://labss.maps.arcgis.com/apps/dashboards/"
+        "ad01106434a443a69924c54f1e8edbf7)"
+    )
 
-    # Keep only the primary street (most frequent) — drop nearby cross-streets
-    if routes:
-        street_counts = Counter(r.get("STNAME", "") for r in routes)
-        primary_street = street_counts.most_common(1)[0][0]
-        routes = [r for r in routes if r.get("STNAME") == primary_street]
-
-    if not routes:
+    if not result["found"]:
         await update.message.reply_text(
-            f"📍 *{label}*\n\n"
-            "No posted sweep routes found nearby. "
-            "This street may not have posted sweeping, or it might be "
-            "outside the City of LA.\n\n"
-            "[Check the map](https://labss.maps.arcgis.com/apps/dashboards/ad01106434a443a69924c54f1e8edbf7)",
+            f"📍 *{label}*\n\n{result['text']}\n\n{map_link}",
             parse_mode="Markdown",
         )
         return
 
     header = f"📍 *{label}*\n"
-
-    body = format_street_summary(routes)
-
     footer = (
         "\n\n[View on LA Map]"
         "(https://labss.maps.arcgis.com/apps/dashboards/ad01106434a443a69924c54f1e8edbf7)"
     )
 
     await update.message.reply_text(
-        header + body + footer,
+        header + result["text"] + footer,
         parse_mode="Markdown",
         disable_web_page_preview=True,
     )

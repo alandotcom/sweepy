@@ -35,7 +35,11 @@ class TestIsSweepToday:
         return patch(  # type: ignore[no-matching-overload]
             "la_sweep_bot.datetime",
             wraps=__import__("datetime").datetime,
-            **{"now.return_value": datetime(d.year, d.month, d.day, 12, 0, tzinfo=LA_TZ)},
+            **{
+                "now.return_value": datetime(
+                    d.year, d.month, d.day, 12, 0, tzinfo=LA_TZ
+                )
+            },
         )
 
     def test_sweep_day_matches(self):
@@ -68,7 +72,11 @@ class TestNextSweepDates:
         return patch(  # type: ignore[no-matching-overload]
             "la_sweep_bot.datetime",
             wraps=__import__("datetime").datetime,
-            **{"now.return_value": datetime(d.year, d.month, d.day, 12, 0, tzinfo=LA_TZ)},
+            **{
+                "now.return_value": datetime(
+                    d.year, d.month, d.day, 12, 0, tzinfo=LA_TZ
+                )
+            },
         )
 
     def test_returns_correct_count(self):
