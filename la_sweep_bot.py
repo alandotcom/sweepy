@@ -237,13 +237,17 @@ def format_street_summary(routes: list[dict]) -> str:
     street_label = " ".join(filter(None, [street, suffix])).upper()
 
     # Collect unique days across all routes
-    days = list(
-        dict.fromkeys(r.get("Posted_Day") for r in routes if r.get("Posted_Day"))
+    days: list[str] = list(
+        dict.fromkeys(
+            d for r in routes if isinstance(d := r.get("Posted_Day"), str)
+        )
     )
 
     # Collect unique posted times across all routes
-    times = list(
-        dict.fromkeys(r.get("Posted_Time") for r in routes if r.get("Posted_Time"))
+    times: list[str] = list(
+        dict.fromkeys(
+            t for r in routes if isinstance(t := r.get("Posted_Time"), str)
+        )
     )
 
     lines = [f"🧹 *{street_label}*"]

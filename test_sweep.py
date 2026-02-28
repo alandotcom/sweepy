@@ -32,7 +32,7 @@ class TestIsSweepToday:
 
         from la_sweep_bot import LA_TZ
 
-        return patch(
+        return patch(  # type: ignore[no-matching-overload]
             "la_sweep_bot.datetime",
             wraps=__import__("datetime").datetime,
             **{"now.return_value": datetime(d.year, d.month, d.day, 12, 0, tzinfo=LA_TZ)},
@@ -65,7 +65,7 @@ class TestNextSweepDates:
 
         from la_sweep_bot import LA_TZ
 
-        return patch(
+        return patch(  # type: ignore[no-matching-overload]
             "la_sweep_bot.datetime",
             wraps=__import__("datetime").datetime,
             **{"now.return_value": datetime(d.year, d.month, d.day, 12, 0, tzinfo=LA_TZ)},
