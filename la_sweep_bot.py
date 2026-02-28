@@ -145,7 +145,7 @@ async def query_sweep_routes(x: float, y: float, radius_ft: int = 200) -> list[d
         "geometryType": "esriGeometryEnvelope",
         "inSR": "4326",
         "spatialRel": "esriSpatialRelIntersects",
-        "outFields": "Route,Posted_Day,Posted_Time,Boundaries,Weeks,Day_Short,STNAME,TDIR,STSFX,Odd_Even",
+        "outFields": "Route,Posted_Day,Posted_Time,Boundaries,Weeks,Day_Short,STNAME,TDIR,STSFX",
         "returnGeometry": "false",
         "resultRecordCount": 10,
     }
@@ -227,59 +227,74 @@ def is_sweep_today(sweep_day_name: str, schedule: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _route_base(route_id: str) -> str:
-    """Strip day suffix from route ID: '12P356 M' → '12P356'."""
-    return route_id.rsplit(" ", 1)[0] if " " in route_id else route_id
+def _parse_time_minutes(time_str: str) -> int | None:
+    """Parse a time like '7:30 am' or '2 pm' into minutes since midnight."""
+    t = time_str.strip().lower()
+    try:
+        for fmt in ("%I:%M %p", "%I %p"):
+            try:
+                dt = datetime.strptime(t, fmt)
+                return dt.hour * 60 + dt.minute
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    return None
 
 
-def format_route_group(group: list[dict]) -> str:
-    """Format a group of route records (same base route) into one card."""
-    first = group[0]
-    route_base = _route_base(first.get("Route") or "Unknown")
-    posted_time = first.get("Posted_Time") or ""
-    schedule = first.get("Weeks") or ""
-    boundaries = first.get("Boundaries") or ""
+def format_street_summary(routes: list[dict]) -> str:
+    """Format all routes for a street into one consolidated card."""
+    first = routes[0]
     street = first.get("STNAME") or ""
     direction = first.get("TDIR") or ""
     suffix = first.get("STSFX") or ""
-    side = first.get("Odd_Even") or ""
+    schedule = first.get("Weeks") or ""
 
-    street_label = " ".join(filter(None, [street, suffix]))
+    street_label = " ".join(filter(None, [direction, street, suffix])).upper()
 
-    # Derive cardinal side from street direction + even/odd
-    # LA convention: E/W streets → even=south, odd=north
-    #                N/S streets → even=west, odd=east
-    side_label = ""
-    if side and direction:
-        side_map = {
-            ("E", "Even"): "south",
-            ("E", "Odd"): "north",
-            ("W", "Even"): "south",
-            ("W", "Odd"): "north",
-            ("N", "Even"): "west",
-            ("N", "Odd"): "east",
-            ("S", "Even"): "west",
-            ("S", "Odd"): "east",
-        }
-        side_label = side_map.get((direction, side), "")
-
-    # Collect unique days across the group
+    # Collect unique days across all routes
     days = list(
-        dict.fromkeys(r.get("Posted_Day") for r in group if r.get("Posted_Day"))
+        dict.fromkeys(r.get("Posted_Day") for r in routes if r.get("Posted_Day"))
     )
 
-    lines = [f"🧹 *Route {route_base}*"]
-    if street_label:
-        side_note = f" ({side_label} side)" if side_label else ""
-        lines.append(f"🛣 Street: {street_label}{side_note}")
+    # Compute time range across all routes
+    all_starts: list[int] = []
+    all_ends: list[int] = []
+    for r in routes:
+        posted_time = r.get("Posted_Time") or ""
+        # Typical format: "7:30 am to 2 pm" or "8 am - 10 am"
+        for sep in (" to ", " - "):
+            if sep in posted_time.lower():
+                parts = posted_time.split(sep, 1)
+                s = _parse_time_minutes(parts[0])
+                e = _parse_time_minutes(parts[1])
+                if s is not None:
+                    all_starts.append(s)
+                if e is not None:
+                    all_ends.append(e)
+                break
+
+    time_range = ""
+    if all_starts and all_ends:
+        earliest = min(all_starts)
+        latest = max(all_ends)
+
+        def _fmt_minutes(m: int) -> str:
+            if m % 60:
+                return (
+                    datetime(2000, 1, 1, m // 60, m % 60).strftime("%-I:%M %p").lower()
+                )
+            return datetime(2000, 1, 1, m // 60).strftime("%-I %p").lower()
+
+        time_range = f"{_fmt_minutes(earliest)} - {_fmt_minutes(latest)}"
+
+    lines = [f"🧹 *{street_label}*"]
     if days:
-        lines.append(f"📅 Days: {', '.join(days)}")
+        lines.append(f"📅 {' & '.join(days)}")
     if schedule:
-        lines.append(f"🔄 Weeks: {schedule}")
-    if posted_time:
-        lines.append(f"🕐 Time: {posted_time}")
-    if boundaries:
-        lines.append(f"📍 Area: {boundaries}")
+        lines.append(f"🔄 {schedule}")
+    if time_range:
+        lines.append(f"🕐 {time_range}")
 
     # Sweep status — check each day
     if days and schedule:
@@ -292,7 +307,7 @@ def format_route_group(group: list[dict]) -> str:
         all_dates.sort()
         if all_dates:
             dates_str = ", ".join(d.strftime("%a %b %-d") for d in all_dates[:4])
-            lines.append(f"\n📆 Next sweeps: {dates_str}")
+            lines.append(f"\n📆 Next: {dates_str}")
 
     return "\n".join(lines)
 
@@ -416,19 +431,7 @@ async def _lookup_coords(update: Update, x: float, y: float, label: str) -> None
 
     header = f"📍 *{label}*\n"
 
-    # Group by base route + street + side so days consolidate into one card
-    groups: dict[tuple, list[dict]] = {}
-    for r in routes:
-        key = (
-            _route_base(r.get("Route") or ""),
-            r.get("STNAME", ""),
-            r.get("TDIR", ""),
-            r.get("Odd_Even", ""),
-        )
-        groups.setdefault(key, []).append(r)
-
-    route_msgs = [format_route_group(g) for g in list(groups.values())[:4]]
-    body = "\n\n---\n\n".join(route_msgs)
+    body = format_street_summary(routes)
 
     footer = (
         "\n\n[View on LA Map]"
