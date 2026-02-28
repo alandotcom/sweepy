@@ -19,6 +19,7 @@ Setup:
 
 import os
 import logging
+from collections import Counter
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
@@ -144,7 +145,7 @@ async def query_sweep_routes(x: float, y: float, radius_ft: int = 200) -> list[d
         "geometryType": "esriGeometryEnvelope",
         "inSR": "4326",
         "spatialRel": "esriSpatialRelIntersects",
-        "outFields": "Route,Posted_Day,Posted_Time,Boundaries,Weeks,Day_Short,STNAME,TDIR,STSFX",
+        "outFields": "Route,Posted_Day,Posted_Time,Boundaries,Weeks,Day_Short,STNAME,TDIR,STSFX,Odd_Even",
         "returnGeometry": "false",
         "resultRecordCount": 10,
     }
@@ -226,28 +227,36 @@ def is_sweep_today(sweep_day_name: str, schedule: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def format_route_info(attrs: dict) -> str:
-    """Format a single route's attributes into a readable message."""
-    # Actual field names from Clean_Street_Routes FeatureServer:
-    #   Route, Posted_Day, Posted_Time, Boundaries, Weeks, Day_Short,
-    #   STNAME, TDIR, STSFX
+def _route_base(route_id: str) -> str:
+    """Strip day suffix from route ID: '12P356 M' → '12P356'."""
+    return route_id.rsplit(" ", 1)[0] if " " in route_id else route_id
 
-    route = attrs.get("Route") or "Unknown"
-    day_name = attrs.get("Posted_Day") or ""
-    posted_time = attrs.get("Posted_Time") or ""
-    schedule = attrs.get("Weeks") or ""
-    boundaries = attrs.get("Boundaries") or ""
-    street = attrs.get("STNAME") or ""
-    direction = attrs.get("TDIR") or ""
-    suffix = attrs.get("STSFX") or ""
+
+def format_route_group(group: list[dict]) -> str:
+    """Format a group of route records (same base route) into one card."""
+    first = group[0]
+    route_base = _route_base(first.get("Route") or "Unknown")
+    posted_time = first.get("Posted_Time") or ""
+    schedule = first.get("Weeks") or ""
+    boundaries = first.get("Boundaries") or ""
+    street = first.get("STNAME") or ""
+    direction = first.get("TDIR") or ""
+    suffix = first.get("STSFX") or ""
+    side = first.get("Odd_Even") or ""
 
     street_label = " ".join(filter(None, [direction, street, suffix]))
 
-    lines = [f"🧹 *Route {route}*"]
+    # Collect unique days across the group
+    days = list(
+        dict.fromkeys(r.get("Posted_Day") for r in group if r.get("Posted_Day"))
+    )
+
+    lines = [f"🧹 *Route {route_base}*"]
     if street_label:
-        lines.append(f"🛣 Street: {street_label}")
-    if day_name:
-        lines.append(f"📅 Day: {day_name}")
+        side_note = f" ({side.lower()} side)" if side else ""
+        lines.append(f"🛣 Street: {street_label}{side_note}")
+    if days:
+        lines.append(f"📅 Days: {', '.join(days)}")
     if schedule:
         lines.append(f"🔄 Weeks: {schedule}")
     if posted_time:
@@ -255,13 +264,17 @@ def format_route_info(attrs: dict) -> str:
     if boundaries:
         lines.append(f"📍 Area: {boundaries}")
 
-    # Sweep status
-    if day_name and schedule:
-        if is_sweep_today(day_name, schedule):
+    # Sweep status — check each day
+    if days and schedule:
+        sweep_today = any(is_sweep_today(d, schedule) for d in days)
+        if sweep_today:
             lines.append("\n⚠️ *SWEEPING TODAY — MOVE YOUR CAR!*")
-        upcoming = next_sweep_dates(day_name, schedule, count=3)
-        if upcoming:
-            dates_str = ", ".join(d.strftime("%a %b %-d") for d in upcoming)
+        all_dates: list[date] = []
+        for d in days:
+            all_dates.extend(next_sweep_dates(d, schedule, count=3))
+        all_dates.sort()
+        if all_dates:
+            dates_str = ", ".join(d.strftime("%a %b %-d") for d in all_dates[:4])
             lines.append(f"\n📆 Next sweeps: {dates_str}")
 
     return "\n".join(lines)
@@ -367,6 +380,12 @@ async def _lookup_coords(update: Update, x: float, y: float, label: str) -> None
     # Drop segments with no posted sweep schedule
     routes = [r for r in raw_routes if r.get("Posted_Day")]
 
+    # Keep only the primary street (most frequent) — drop nearby cross-streets
+    if routes:
+        street_counts = Counter(r.get("STNAME", "") for r in routes)
+        primary_street = street_counts.most_common(1)[0][0]
+        routes = [r for r in routes if r.get("STNAME") == primary_street]
+
     if not routes:
         await update.message.reply_text(
             f"📍 *{label}*\n\n"
@@ -380,15 +399,18 @@ async def _lookup_coords(update: Update, x: float, y: float, label: str) -> None
 
     header = f"📍 *{label}*\n"
 
-    seen = set()
-    unique_routes = []
+    # Group by base route + street + side so days consolidate into one card
+    groups: dict[tuple, list[dict]] = {}
     for r in routes:
-        key = (r.get("Route", ""), r.get("Posted_Day", ""), r.get("STNAME", ""), r.get("TDIR", ""))
-        if key not in seen:
-            seen.add(key)
-            unique_routes.append(r)
+        key = (
+            _route_base(r.get("Route") or ""),
+            r.get("STNAME", ""),
+            r.get("TDIR", ""),
+            r.get("Odd_Even", ""),
+        )
+        groups.setdefault(key, []).append(r)
 
-    route_msgs = [format_route_info(r) for r in unique_routes[:4]]
+    route_msgs = [format_route_group(g) for g in list(groups.values())[:4]]
     body = "\n\n---\n\n".join(route_msgs)
 
     footer = (
